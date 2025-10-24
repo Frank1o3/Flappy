@@ -1,248 +1,226 @@
 #!/usr/bin/env python3
 """
 Flappy Bird Multiplayer Server with SQLite persistence
-Users: (id, username, password)
-Scores: (id, best, user_id)
+Uses new modular architecture: server_db, data_models, physics_server.
 """
 
 import socket
 import json
 import threading
 import time
-import sqlite3
-from physics_engine import Player, ServerEngine, SCREEN_HEIGHT  # shared physics module
+from typing import Dict, Tuple
 
-# -------- Config --------
-GAME_PORT = 50007
-DISCOVERY_PORT = 37020
-TICK_RATE = 1/30  # 30 ticks per second
-DB_FILE = "flappy_server.db"
+# --- Import from new modular structure ---
+from .constants import GAME_PORT, DISCOVERY_PORT, TICK_TIME
+from .data_models import Player
+from .physics_server import ServerEngine
+from .server_db import Database
 
-# -------- Database Layer --------
+# -------- Server Class --------
 
-
-class Database:
-    def __init__(self, db_file=DB_FILE):
-        self.conn = sqlite3.connect(db_file, check_same_thread=False)
-        self.cur = self.conn.cursor()
-        self.setup()
-
-    def setup(self):
-        self.cur.execute("""
-            CREATE TABLE IF NOT EXISTS Users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE,
-                password TEXT
-            )
-        """)
-        self.cur.execute("""
-            CREATE TABLE IF NOT EXISTS Scores (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                best INTEGER DEFAULT 0,
-                user_id INTEGER,
-                FOREIGN KEY(user_id) REFERENCES Users(id)
-            )
-        """)
-        self.conn.commit()
-
-    def get_user(self, username):
-        self.cur.execute(
-            "SELECT id, username, password FROM Users WHERE username=?", (username,))
-        return self.cur.fetchone()
-
-    def add_user(self, username, password):
-        self.cur.execute(
-            "INSERT INTO Users (username, password) VALUES (?, ?)", (username, password))
-        uid = self.cur.lastrowid
-        self.cur.execute(
-            "INSERT INTO Scores (best, user_id) VALUES (?, ?)", (0, uid))
-        self.conn.commit()
-        return uid
-
-    def validate_user(self, username, password):
-        row = self.get_user(username)
-        if not row:
-            return None
-        uid, _, stored_pw = row
-        if stored_pw == password:
-            return uid
-        return None
-
-    def update_score(self, user_id, new_score):
-        self.cur.execute("SELECT best FROM Scores WHERE user_id=?", (user_id,))
-        row = self.cur.fetchone()
-        if row and new_score > row[0]:
-            self.cur.execute(
-                "UPDATE Scores SET best=? WHERE user_id=?", (new_score, user_id))
-            self.conn.commit()
-
-    def get_leaderboard(self, top=3):
-        self.cur.execute("""
-            SELECT Users.username, Scores.best
-            FROM Scores
-            JOIN Users ON Scores.user_id = Users.id
-            ORDER BY Scores.best DESC
-            LIMIT ?
-        """, (top,))
-        return self.cur.fetchall()
-
-
-# -------- Server Networking --------
 class FlappyServer:
     def __init__(self):
-        self.server_engine = ServerEngine()
-        self.players: dict[str, Player] = {}
-        self.user_ids: dict[str, int] = {}  # username → user_id
-        self.running = True
-
+        # Database
         self.db = Database()
+        self.user_ids: Dict[str, int] = {}  # Map: username -> user_id
 
-        # Main UDP socket
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("", GAME_PORT))
-
-        # Discovery socket
+        # Network
+        self.game_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.game_sock.bind(('', GAME_PORT))
+        
         self.discovery_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.discovery_sock.setsockopt(
-            socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.discovery_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
+        # Game State
+        self.players: Dict[str, Player] = {}
+        self.player_addrs: Dict[Tuple[str, int], str] = {} # Map: (IP, Port) -> username
+        self.server_engine = ServerEngine()
+
+        # Threading
+        self.running = threading.Event()
+        self.running.set()
+        self.network_thread = threading.Thread(target=self._network_loop)
+        self.game_thread = threading.Thread(target=self._game_loop)
+        self.discovery_thread = threading.Thread(target=self._discovery_loop)
+        
     def start(self):
-        threading.Thread(target=self.discovery_loop, daemon=True).start()
-        threading.Thread(target=self.listen_loop, daemon=True).start()
-        self.game_loop()
-
-    def discovery_loop(self):
-        while self.running:
-            msg = json.dumps({"type": "discovery", "port": GAME_PORT})
-            self.discovery_sock.sendto(
-                msg.encode(), ("<broadcast>", DISCOVERY_PORT))
-            time.sleep(2)
-
-    def listen_loop(self):
-        while self.running:
+        """Start all server loops."""
+        self.network_thread.start()
+        self.game_thread.start()
+        self.discovery_thread.start()
+        
+    def stop(self):
+        """Stop all server loops."""
+        print("Stopping server...")
+        self.running.clear()
+        self.network_thread.join()
+        self.game_thread.join()
+        self.discovery_thread.join()
+        self.game_sock.close()
+        self.discovery_sock.close()
+        print("Server stopped.")
+        
+    def _discovery_loop(self):
+        """Broadcasts server presence for clients to find."""
+        print(f"Discovery thread started. Broadcasting on port {DISCOVERY_PORT}.")
+        msg = json.dumps({"type": "discovery", "port": GAME_PORT}).encode('utf-8')
+        while self.running.is_set():
             try:
-                data, addr = self.sock.recvfrom(4096)
-                msg = json.loads(data.decode())
-                self.handle_message(msg, addr)
+                self.discovery_sock.sendto(msg, ('<broadcast>', DISCOVERY_PORT))
+                time.sleep(2)  # Broadcast every 2 seconds
             except Exception as e:
-                print("Listen error:", e)
+                if self.running.is_set():
+                    print(f"Discovery error: {e}")
+                
+    def _network_loop(self):
+        """Listens for and processes incoming UDP packets (login, input)."""
+        print(f"Network thread started. Listening on port {GAME_PORT}.")
+        while self.running.is_set():
+            try:
+                data, addr = self.game_sock.recvfrom(65536)
+                message = json.loads(data.decode('utf-8'))
+                
+                msg_type = message.get("type")
+                username = message.get("username")
+                
+                if msg_type == "login":
+                    self._handle_login(message, addr)
+                elif msg_type == "input" and username in self.players:
+                    self._handle_input(message, username)
+                else:
+                    self._send_error(addr, "unknown_message", "Invalid message type or user not logged in.")
+                    
+            except socket.timeout:
+                continue
+            except ConnectionResetError:
+                if addr:
+                    self._handle_disconnect(addr)
+                else:
+                    print("ConnectionResetError on socket before address was assigned.")
+            except Exception as e:
+                if self.running.is_set():
+                    print(f"Network processing error: {e}")
 
-    def handle_message(self, msg, addr):
-        mtype = msg.get("type")
+    def _handle_login(self, message: dict, addr: Tuple[str, int]):
+        """Authenticates user and adds them to the game state."""
+        username = message["username"]
+        password = message["password"]
+        
+        user_data = self.db.get_user(username)
 
-        if mtype == "login":
-            username, password = msg.get("username"), msg.get("password")
-            user = self.db.get_user(username)
+        if user_data is None:
+            user_id = self.db.add_user(username, password)
+            if user_id is None:
+                return self._send_error(addr, "login_failed", "Registration failed (username taken).")
+            print(f"New user registered: {username}")
+        else:
+            user_id, _, stored_password = user_data
+            if stored_password != password:
+                return self._send_error(addr, "login_failed", "Incorrect password.")
+        
+        # Successful Login/Registration
+        if username not in self.players:
+            self.players[username] = Player(id=username, addr=addr)
+            self.user_ids[username] = user_id
+            self.player_addrs[addr] = username
+            print(f"Player {username} logged in from {addr}")
+        
+        # Send a confirmation back to the client
+        self.game_sock.sendto(json.dumps({
+            "type": "login_success", 
+            "username": username,
+            "server_tick_rate": int(1/TICK_TIME)
+        }).encode('utf-8'), addr)
 
-            if not user:
-                uid = self.db.add_user(username, password)
-                print(f"New user registered: {username}")
-            else:
-                uid = self.db.validate_user(username, password)
-                if not uid:
-                    self.send(addr, {"type": "login_fail",
-                              "reason": "Invalid password"})
-                    return
+    def _handle_input(self, message: dict, username: str):
+        """Processes player input (flap)."""
+        player = self.players.get(username)
+        if player:
+            player.pending_flap = message.get("flap", False)
+            player.last_seq_received = message.get("seq", 0)
 
-            if username not in self.players:
-                self.players[username] = Player(username)
+    def _handle_disconnect(self, addr: Tuple[str, int]):
+        """Clean up state for a disconnected player."""
+        username = self.player_addrs.pop(addr, None)
+        if username and username in self.players:
+            player = self.players.pop(username)
+            print(f"Player {username} disconnected from {addr}. Final score: {player.score}")
+            self.db.update_score(self.user_ids.get(username, -1), player.score)
 
-            self.players[username].alive = True
-            self.players[username].score = 0
-            if uid is not None:
-                self.user_ids[username] = uid
-            else:
-                self.send(addr, {"type": "login_fail",
-                          "reason": "User ID is None"})
-                return
+    def _send_error(self, addr: Tuple[str, int], error_type: str, message: str):
+        """Sends an error message to a client."""
+        error_msg = json.dumps({"type": error_type, "message": message}).encode('utf-8')
+        self.game_sock.sendto(error_msg, addr)
+        print(f"Sent error to {addr}: {message}")
 
-            # ensure we have a place to store last_seq_received
-            if not hasattr(self.players[username], "last_seq_received"):
-                self.players[username].last_seq_received = 0
+    def broadcast(self, message: dict):
+        """Sends the game state to all connected players."""
+        data = json.dumps(message).encode('utf-8')
+        addrs = [p.addr for p in self.players.values() if p.addr]
+        
+        for addr in addrs:
+            try:
+                self.game_sock.sendto(data, addr)
+            except Exception as e:
+                print(f"Error broadcasting to {addr}: {e}")
 
-            self.send(addr, {"type": "login_ok", "username": username})
-            self.players[username].addr = addr
-
-        elif mtype == "input":
-            username = msg.get("username")
-            flap = msg.get("flap", False)
-            seq = int(msg.get("seq", 0))
-            if username in self.players:
-                # store flap and the sequence we received; the flap will be used on next tick
-                self.players[username].pending_flap = flap
-                # store highest seq seen so far for this player
-                prev = getattr(self.players[username], "last_seq_received", 0)
-                self.players[username].last_seq_received = max(prev, seq)
-        elif mtype == "respawn":
-            uname = msg.get("username")
-            if uname in self.players:
-                # Reset player state
-                p = self.players[uname]
-                p.y = SCREEN_HEIGHT // 2
-                p.velocity = 0
-                p.alive = True
-                p.score = 0
-        elif mtype == "disconnect":
-            uname = msg.get("username")
-            if uname in self.players:
-                del self.players[uname]
-                print(f"[server] {uname} disconnected")
-
-    def send(self, addr, obj):
-        try:
-            self.sock.sendto(json.dumps(obj).encode(), addr)
-        except Exception as e:
-            print("Send error:", e)
-
-    def broadcast(self, obj):
-        for p in list(self.players.values()):
-            if hasattr(p, "addr"):
-                self.send(p.addr, obj)
-
-    def game_loop(self):
-        while self.running:
-            flaps = {pid: getattr(p, "pending_flap", False)
-                     for pid, p in self.players.items()}
-            # clear per-tick pending flaps after collecting them
-            for p in self.players.values():
+    def _game_loop(self):
+        """The main authoritative game loop running at the fixed tick rate."""
+        print(f"Game thread started. Tick rate: {1/TICK_TIME} Hz.")
+        while self.running.is_set():
+            start_time = time.time()
+            
+            # 1. Collect inputs for the current tick
+            flaps_this_tick = {}
+            for username, p in self.players.items():
+                flaps_this_tick[username] = p.pending_flap
                 p.pending_flap = False
 
-            self.server_engine.step(self.players, flaps)
+            # 2. Run the authoritative physics step
+            self.server_engine.step(self.players, flaps_this_tick)
 
-            # Save scores for dead players
+            # 3. Save scores for dead players & prepare state for broadcast
+            players_state = {}
             for username, p in self.players.items():
                 if not p.alive:
                     uid = self.user_ids.get(username)
                     if uid:
                         self.db.update_score(uid, p.score)
+                
+                players_state[username] = p.to_client_state()
 
-            # Build players state and include last_seq_received so clients can purge confirmed inputs
-            players_state = {}
-            for pid, p in self.players.items():
-                players_state[pid] = {
-                    "y": p.y,
-                    "v": p.velocity,
-                    "alive": p.alive,
-                    "score": p.score,
-                    "last_seq": int(getattr(p, "last_seq_received", 0))
-                }
-
-            # Broadcast game state + leaderboard
+            # 4. Build and Broadcast game state + leaderboard
             leaderboard = self.db.get_leaderboard()
             state = {
                 "type": "state",
                 "tick": self.server_engine.tick_count,
                 "players": players_state,
-                "pipes": [{"x": pipe.x, "gap_y": pipe.gap_y} for pipe in self.server_engine.pipes],
+                "pipes": [
+                    {"x": round(pipe.x, 2), "gap_y": round(pipe.gap_y, 2)} 
+                    for pipe in self.server_engine.pipes
+                ],
                 "leaderboard": leaderboard
             }
             self.broadcast(state)
 
-            time.sleep(TICK_RATE)
+            # 5. Time remaining until next tick
+            elapsed_time = time.time() - start_time
+            sleep_time = TICK_TIME - elapsed_time
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
 
 if __name__ == "__main__":
+    import sys, os
+    if os.path.basename(os.getcwd()) == 'src':
+        sys.path.insert(0, os.path.abspath('..'))
+        
     server = FlappyServer()
     print(
         f"Server initialized on UDP port {GAME_PORT}. Discovery on UDP port {DISCOVERY_PORT}.")
-    server.start()
+    try:
+        server.start()
+        while server.running.is_set():
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        server.stop()
