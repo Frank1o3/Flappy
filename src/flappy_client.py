@@ -15,13 +15,13 @@ from constants import PIPE_GAP
 from typing import Dict, List, Tuple, Optional
 
 # --- Import from new modular structure ---
-from .constants import (
+from constants import (
     GAME_PORT, DISCOVERY_PORT, BUFFER_SIZE, SERVER_DISCOVERY_TIMEOUT, 
-    SERVER_TICK_RATE, CLIENT_TICK_RATE, SCREEN_WIDTH, SCREEN_HEIGHT, 
+    SERVER_TICK_RATE, SCREEN_WIDTH, SCREEN_HEIGHT, 
     BIRD_X, PIPE_WIDTH
 )
-from .data_models import ClientPlayerState, ClientPipeState
-from .physics_client import ClientEngine
+from data_models import ClientPlayerState, ClientPipeState
+from physics_client import ClientEngine
 
 # RENDER_FPS can be faster than SERVER_TICK_RATE for smooth rendering
 RENDER_FPS = 60

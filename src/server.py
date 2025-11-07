@@ -11,10 +11,10 @@ import time
 from typing import Dict, Tuple
 
 # --- Import from new modular structure ---
-from .constants import GAME_PORT, DISCOVERY_PORT, TICK_TIME
-from .data_models import Player
-from .physics_server import ServerEngine
-from .server_db import Database
+from constants import GAME_PORT, DISCOVERY_PORT, TICK_TIME
+from data_models import Player
+from physics_server import ServerEngine
+from server_db import Database
 
 # -------- Server Class --------
 

@@ -5,7 +5,7 @@ data_models.py: Data structures for the game state.
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .constants import RESPAWN_Y
+from constants import RESPAWN_Y
 
 @dataclass
 class Player:

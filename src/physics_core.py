@@ -3,12 +3,12 @@ physics_core.py: The shared, deterministic kinematic functions and collision log
 """
 
 from typing import List, Union # <-- ADDED Union for type flexibility
-from .constants import (
+from constants import (
     GRAVITY_ACCEL, JUMP_IMPULSE, MAX_FALL_VELOCITY, TICK_TIME,
     SCREEN_HEIGHT, BIRD_X, PIPE_WIDTH, PIPE_GAP, BIRD_RADIUS, RESPAWN_Y
 )
 # Imported both Pipe models for the shared check_collision function
-from .data_models import Player, Pipe, ClientPipeState 
+from data_models import Player, Pipe, ClientPipeState 
 
 class PhysicsCore:
     """

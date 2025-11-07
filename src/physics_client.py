@@ -5,9 +5,9 @@ physics_client.py: The client-side prediction and reconciliation engine.
 from typing import List
 from dataclasses import dataclass
 
-from .constants import PIPE_SPEED_PPS
-from .data_models import ClientPlayerState, ClientPipeState
-from .physics_core import PhysicsCore
+from constants import PIPE_SPEED_PPS
+from data_models import ClientPlayerState, ClientPipeState
+from physics_core import PhysicsCore
 
 @dataclass
 class ClientEngine(PhysicsCore):

@@ -14,7 +14,7 @@ TICK_TIME = 1.0 / SERVER_TICK_RATE # Fixed time step (Delta Time)
 CLIENT_TICK_RATE = SERVER_TICK_RATE # Client prediction rate (should match server)
 
 # -------- Game World Config --------
-SCREEN_WIDTH = 480
+SCREEN_WIDTH = 560
 SCREEN_HEIGHT = 800
 BIRD_X = 100                    # Fixed bird X position
 RESPAWN_Y = SCREEN_HEIGHT // 2

@@ -6,12 +6,12 @@ import random
 from typing import Dict, List
 from dataclasses import dataclass, field
 
-from .constants import (
+from constants import (
     PIPE_SPEED_PPS, PIPE_SPAWN_INTERVAL_TICKS,
     SCREEN_WIDTH, SCREEN_HEIGHT, PIPE_WIDTH, PIPE_GAP, BIRD_X
 )
-from .data_models import Player, Pipe
-from .physics_core import PhysicsCore
+from data_models import Player, Pipe
+from physics_core import PhysicsCore
 
 @dataclass
 class ServerEngine(PhysicsCore):
